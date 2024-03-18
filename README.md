@@ -1,4 +1,4 @@
-# Geofence Reccommender Project
+# Geofence Recommender Project
 
 ## Overview
 This repository hosts a suite of Python scripts designed for optimizing truck routes and stop locations, with a focus on Geofencing interesteing areas and improving logistical efficiency through Machine Learning, data analysis and visualization.
