@@ -1,6 +1,9 @@
-# Geofence Recommender Project
+# Geofence Reccommender Project
+
+![geofence-recommender-etl-pipeline](geofence-recommender-etl-pipeline.png)
 
 ## Overview
+
 This repository hosts a suite of Python scripts designed for optimizing truck routes and stop locations, with a focus on Geofencing interesteing areas and improving logistical efficiency through Machine Learning, data analysis and visualization.
 
 ## Scripts
@@ -18,4 +21,5 @@ To use these scripts, clone this repository and ensure you have Python 3.6 or hi
 ```sh
 streamlit run map_visual.py
 ```
+
 This project is ongoing and will be updated as and when

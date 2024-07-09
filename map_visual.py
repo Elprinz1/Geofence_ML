@@ -1,47 +1,107 @@
 import streamlit as st
 import pandas as pd
+import folium
 import os
-import folium
+
+
+from data_preprocessing import recommendation_algo
+from data_preprocessing import create_cluster_map
 from streamlit_folium import st_folium
-import pandas as pd
-from truck import *
-import folium
+
 from itertools import cycle
+from truck import *
 
-# Streamlit Page
+
+######################################
+# Function to load data, if not already in session state
+
+
+def load_data():
+    if 'df_fleet' not in st.session_state:
+        dfs = os.path.expanduser(
+            "/Users/elprinz/data/geofence_data/large_fleet/2857419_tracker_location_Feb-Apr/large_fleet_2857419_tracker_location_Feb-Apr.pickle")
+        st.session_state.df_fleet = pd.read_pickle(dfs)
+
+
+######################################
+
+
 st.set_page_config(
-    page_title="Geofence Recommender", page_icon="truck:", layout="wide"
+    page_title="Geofence Recommender",
+    page_icon=":truck:",
+    layout="wide"
 )
-st.title(
-    "TruckX - Geofence Recommendation"
-)
 
 
-st.subheader("Visualize Truck Routes")
+# Using columns and markdown for a cleaner, more structured layout
+col1, col2 = st.columns([1, 3])
 
-# Instructions and Overview on separate lines
-st.write("1. Select Truck(s) to visualize their geofenced stops on the map.")
-st.write("2. After selection, the map below will display each truck's stops with distinct colors for clarity.")
-st.write("3. Use the 'Select Truck(s)' dropdown to choose and add trucks to the map.")
-st.write("4. You can select multiple trucks to compare their stops.")
+with col1:
+    # Using markdown with HTML to center the image within the column
+    st.image("images/truckx.png", width=200)
 
-# Read Pickle
-dfs = os.path.expanduser("~/data/geofence_data/merged_csv.pickle")
-df_fleet = pd.read_pickle(dfs)
-device_ids = df_fleet.device_id.unique()
-truck_ids = {"Truck_" + str(count + 1): id for count,
-             id in enumerate(device_ids)}
+with col2:
+    # Using markdown with HTML to center the title within the column
+    st.markdown(
+        f"""
+        <div style="text-align: center;">
+            <h1>TruckX - Geofence Recommender</h1>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+st.markdown("***")
+
+# Improving the instructions and overview for better readability and aesthetics
+st.markdown("""
+    <div style="background-color: #f0f2f6; padding: 10px; border-radius: 10px;">
+        <h4>Truck Routes:</h4>
+        <ol>
+            <li>Select Truck(s) to view geofenced stops on the map.</li>
+            <li>After selection, the map below will display each truck's stops with distinct colors for clarity.</li>
+            <li>Use the 'Select Truck(s)' dropdown to choose and add trucks to the map.</li>
+            <li>You can select multiple trucks to compare their stops.</li>
+        </ol>
+    </div>
+""", unsafe_allow_html=True)
+
+# Read Pickle for truck data
+load_data()
+# load_data_cluster()
+
+# Extracting unique device IDs and mapping them to truck IDs
+
+device_ids = st.session_state.df_fleet.device_id.unique()[:10]
+truck_ids = {f"Truck_{count + 1}": id for count, id in enumerate(device_ids)}
+truck_ids["All Trucks"] = "all"
 
 options = st.multiselect(
-    ' ',
-    list(truck_ids.keys()), label_visibility='hidden', placeholder="Select Truck(s)", key="truck_stops"
+    label="Select Truck(s) to Visualize:",
+    options=list(truck_ids.keys()),  # Convert keys to a list
+    placeholder="Select Truck(s)",
+    key="truck_stops",
+    help="Choose one or more trucks to display their routes."
 )
 
 selected_truck_ids = []
 
-# Check if any truck is selected and display the corresponding IDs in a list
-if options:
-    selected_truck_ids = [int(truck_ids[option]) for option in options]
+if "All Trucks" in options:
+    # Select all device IDs if "All Trucks" is selected
+    selected_truck_ids = device_ids.tolist()
+else:
+    selected_truck_ids = [int(truck_ids[option])
+                          for option in options if option != "All Trucks"]
+
+
+colh, cold = st.columns(2)
+
+with colh:
+    hours = st.number_input(
+        'Hours (Time Parked)', min_value=1, value=1, key='hours')
+with cold:
+    days = st.number_input(
+        'Lookback Period (days)', min_value=1, value=90, key='days')
 
 
 if selected_truck_ids:
@@ -51,8 +111,11 @@ if selected_truck_ids:
     first_truck = True
 
     for truck_id in selected_truck_ids:
-        truck_data = FLEET([truck_id], df_fleet).get_data_frame()
-        df = truck_data.get_stops().fleetstops_dataframe
+        truck_data = FLEET(
+            [truck_id],  st.session_state.df_fleet).get_data_frame(n_days=days)
+
+        df = truck_data.get_stops(
+            time_threshold=pd.Timedelta(hours=hours)).fleetstops_dataframe
 
         if first_truck:  # Initialize the map with the first truck's location
             start_latitude = df.iloc[0]['latitude']
@@ -79,48 +142,35 @@ if selected_truck_ids:
     # Call to render Folium map in Streamlit
     st_data = st_folium(m, height=500, width=1200)
 
-st.subheader("Visualize Clusters of Stops for Selected Truck(s)")
-
-# Detailed instructions on separate lines
-st.write("1. Use this section to select one or more trucks and define parameters to visualize how frequently trucks stop at various locations.")
-st.write("2. Clusters are determined based on your specified 'Stop Threshold' and 'Hours' parameters, representing the minimum number of stops within a certain time frame to form a cluster.")
-st.write("3. Adjust these parameters and select trucks to see their stop clusters on the map.")
-
-options_clusters = st.multiselect(
-    ' ',
-    list(truck_ids.keys()), label_visibility='hidden', placeholder="Select Truck(s)", key="clusters"
-)
-
-selected_truck_ids_cluster = []
+# Improving the instructions and overview for better readability and aesthetics
+st.markdown("""
+    <div style="background-color: #f0f2f6; padding: 10px; border-radius: 10px;">
+        <h4>Truck Clusters:</h4>
+        <ol>
+            <li>Insert Truck(s) minimum distance threshold in km (the minimum distance between trucks).</li>
+        </ol>
+    </div>
+""", unsafe_allow_html=True)
 
 
-col1, col2 = st.columns(2)
-
-with col1:
-    stop_threshold = st.number_input(
-        'Insert a number for stop threshold', min_value=0.2, value=0.2, key="stop_threshold")
-with col2:
-    hours = st.number_input(
-        'Insert a number for hours', min_value=1, value=1, key='hours')
+stop_threshold = st.number_input(
+    'Minimum distance threshold (km)', min_value=0.2, value=0.2, key="stop_threshold")
 
 
-# Check if any truck is selected and display the corresponding IDs in a list
-if options_clusters:
-    selected_truck_ids_cluster = [
-        int(truck_ids[options_cluster]) for options_cluster in options_clusters]
-
-
-if selected_truck_ids_cluster:
-    # Fixed color for the single truck
-
+if selected_truck_ids:
     # Get data for the selected truck
-    truck_data = FLEET(selected_truck_ids_cluster, df_fleet).get_data_frame().get_stops().getClustersFrequency(
-        stop_threshold=stop_threshold, time_threshold=pd.Timedelta(hours=hours))
-    df = truck_data.clusters
+    cluster_truck_data = FLEET(selected_truck_ids, st.session_state.df_fleet).get_data_frame(n_days=days).get_stops(time_threshold=pd.Timedelta(hours=hours)).getClustersFrequency(
+        stop_threshold=stop_threshold).get_proximity_df()
+
+    df = cluster_truck_data.clusters
+
+# ------>DO NOT NEED<-------
+    # df = st.session_state.df_fleet_cluster
+# ------>DO NOT NEED<-------
 
     # Initialize the map with the truck's first location
-    start_latitude = df.iloc[0]['cluster_centroid'][0]
-    start_longitude = df.iloc[0]['cluster_centroid'][1]
+    start_latitude = float(df.iloc[0]['cluster_centroid'][0])
+    start_longitude = float(df.iloc[0]['cluster_centroid'][1])
     m = folium.Map(
         location=[start_latitude, start_longitude], zoom_start=5)
 
@@ -129,10 +179,11 @@ if selected_truck_ids_cluster:
         folium.CircleMarker(
             location=[row['cluster_centroid']
                       [0], row['cluster_centroid'][1]],
-            radius=row['Frequency_of_stops'],
+            radius=(row['Frequency_of_stops']/10),
             color="red",
+            tooltip=row['clusters'],
             fill=True,
-            fill_color=truck_color,
+            fill_color='red',
             fill_opacity=0.6
         ).add_to(m)
 
@@ -142,3 +193,48 @@ if selected_truck_ids_cluster:
 
     # Call to render Folium map in Streamlit
     st_data = st_folium(m, height=500, width=1200)
+
+######################################
+
+
+st.markdown("""
+    <div style="background-color: #f0f2f6; padding: 10px; border-radius: 10px;">
+        <h4>Recommended Truck Clusters by Business Case:</h4>
+    </div>
+""", unsafe_allow_html=True)
+
+
+# homogenous = st.slider("Homogenous", min_value=min(
+#     df.homogeneous), max_value=max(df.homogeneous), key='homogenous')
+
+st.write('----')
+
+# Streamlit app layout
+st.sidebar.title('Map Use Case Selector')
+# Setting 'reset' as the default value directly in the radio widget
+use_case = st.sidebar.radio(
+    "Select Use Case:", ['Optimization', 'Tracking', 'Safety'], index=1)
+
+# Mapping use cases to colors
+use_case_to_color = {
+    'Optimization': '#008000',
+    'Tracking': '#1890FF',
+    'Safety': '#FF0000'
+}
+
+try:
+    case_color = use_case_to_color[use_case]
+    unique_ids = 10
+
+    proximity_df = cluster_truck_data.proximity_df
+
+    st.session_state.final_df = recommendation_algo(
+        proximity_df, unique_ids, size='small', use_case=use_case)
+
+    map_object = create_cluster_map(
+        st.session_state.final_df, case_color, use_case)
+    st.components.v1.html(folium.Map._repr_html_(
+        map_object), height=500, width=1200)
+except IndexError as e:
+    st.error(
+        "Filter does not match any data. Please adjust the filter and try again.")

@@ -1,7 +1,14 @@
 import pandas as pd
 import numpy as np
+import folium
 import time
+import streamlit as st
 from geopy.geocoders import Nominatim
+from shapely.geometry import Polygon
+from scipy.stats import entropy
+from collections import Counter
+
+geolocator = Nominatim(user_agent='geoapiExcises')
 
 
 def haversine(lon1, lat1, lon2, lat2):
@@ -44,10 +51,11 @@ def get_stop_groups(data_frame):
     # Threshold for considering the car stopped, in kilometers (e.g., 0.05 km)
     stop_threshold = 0.05
     # Initialize lists for latitude, longitude, percentage, and ts
-    percent = []
+    # percent = []
     ts = []
     latvalues = []
     longvalues = []
+    ids = []
 
     # Calculate previous longitude and latitude
     data_frame['prev_lon'] = data_frame['longitude'].shift()
@@ -99,21 +107,25 @@ def get_stop_groups(data_frame):
     large_master_df = pd.DataFrame(list_stopped).T
     df_reset = large_master_df.reset_index()
 
-    total_stopped = df_reset[0].sum()
+    # total_stopped = df_reset[0].sum()
 
     # Populate lists with data
     for i in range(len(df_reset)):
         ts.append(df_reset[1][i]['ts'])
         latvalues.append(df_reset[1][i]['latitude'])
         longvalues.append(df_reset[1][i]['longitude'])
-        percent.append(df_reset[0][i]/total_stopped)
+        ids.append(df_reset[1][i]['device_id'])
+
+        # percent.append(df_reset[0][i]/total_stopped)
 
     # Update DataFrame with new columns
     df_reset['latitude'] = latvalues
     df_reset['longitude'] = longvalues
-    df_reset['percent'] = percent
+    # df_reset['percent'] = percent
     df_reset['timestamp'] = ts
-    df_reset['id'] = data_frame['device_id']
+    df_reset['id'] = ids
+
+    df_reset['id'] = df_reset['id'].astype(int)
 
     # Drop the now unnecessary column
     df_with_stops = df_reset.drop(df_reset.columns[2], axis=1)
@@ -121,7 +133,7 @@ def get_stop_groups(data_frame):
     return df_with_stops
 
 
-def get_location(lon, lat):
+def get_location(coordinates):
     """
     Retrieves the address corresponding to the given longitude and latitude.
 
@@ -133,84 +145,113 @@ def get_location(lon, lat):
     dict: A dictionary containing the address components of the location.
     """
     time.sleep(1)  # to reduce the request made each time
-    geolocator = Nominatim(user_agent='geoapiExcises')
-    location = geolocator.reverse(f'{lat},{lon}')
+
+    location = geolocator.reverse(f'{coordinates[0]},{coordinates[1]}')
     address = location.raw['address']
     return address
 
 
-def get_clusters_and_frequency(dataframe, stop_threshold=0.2):
+def count_truck_occurrences(coordinates, waiting_time):
+    # Extract truck IDs from each tuple using list comprehension
+    truck_wait_times_sum = {}
+    truck_ids = [coord[-1] for coord in coordinates]
+    wait_times = list(zip(truck_ids, waiting_time))
+    truck_id_counts = Counter(truck_ids)
+    for truck_id, wait_time in wait_times:
+        if truck_id in truck_wait_times_sum:
+            truck_wait_times_sum[truck_id] += wait_time
+        else:
+            truck_wait_times_sum[truck_id] = wait_time
+    return truck_id_counts, truck_wait_times_sum
+
+
+def get_clusters_and_frequency(dataframe, stop_threshold=0.5):
     """
-    Identify clusters of stops and calculate their frequency and total waiting time.
+    Calculate cluster frequency of get stop groups \
+        the index of the closest cluster for each cluster.
 
     Parameters:
-    - dataframe (DataFrame): DataFrame containing stop data
-    - stop_threshold (float): Distance threshold to consider stops as part of the same cluster
+    - dataframe (DataFrame): DataFrame containing get stop groups
 
     Returns:
-    - DataFrame: DataFrame containing clusters of stops, their frequencies, and total waiting time
+    - DataFrame: DataFrame with new columns \
+        'clusters' and 'frequency_of_clusters'
     """
-    # Use a dictionary to store unique cluster centroids and their corresponding waiting times
+    # Convert DataFrame to NumPy array for computation
+    data = dataframe[['latitude', 'longitude', 'id',
+                      'waiting_time', 'timestamp']].to_numpy()
     cluster_details = {}
-    # List to store mean coordinates of each cluster centroid
-    cluster_centroid_cords = []
-
-    # Iterate over each row in the DataFrame
-    for index, row_0 in dataframe.iterrows():
-        distances = []
-        # Calculate distances to other cluster centroids in the DataFrame
-        for row in range(len(dataframe)):
-            distance = haversine(
-                row_0['longitude'], 
-                row_0['latitude'], 
-                dataframe.iloc[row]['longitude'], 
-                dataframe.iloc[row]['latitude'])
-            # Check if the distance is below the threshold
-            if distance < stop_threshold:
-                lat = dataframe.iloc[row]['latitude']
-                lon = dataframe.iloc[row]['longitude']
-                time_stopped = dataframe.iloc[row]['waiting_time']
-                       
-                timestamp = dataframe.iloc[row]['timestamp']
-                row_tuple = (lat, lon)
-                # Add the row to the dictionary if it's unique      
-                if row_tuple not in cluster_details:
-                    cluster_details[row_tuple] = {'waiting_time': time_stopped, 'timestamp': timestamp}
-                    distances.append((lat, lon))
-                else:
-                    # Update the waiting time for existing cluster centroid
-                    cluster_details[row_tuple]['waiting_time'] += time_stopped
-
-        # Calculate the mean latitude and longitude for the cluster centroid
-        if distances:
-            mean_lat = np.mean([lat for lat, lon in distances])
-            mean_lon = np.mean([lon for lat, lon in distances])
-            # Extend the list with the mean coordinates for each existing coordinate in the group
-            cluster_centroid_cords.extend([(mean_lat, mean_lon)] * len(distances))
-
-    # Create a DataFrame from the unique cluster centroid details
-    df = pd.DataFrame(cluster_details.values())
-
-    # Add mean latitude and longitude columns to the DataFrame
-    df['mean_latitude'] = [lat for lat, _ in cluster_centroid_cords[:len(df)]]
-    df['mean_longitude'] = [lon for _, lon in cluster_centroid_cords[:len(df)]]
-
-    # Create a tuple of mean latitude and longitude as a cluster centroid identifier
-    df['cluster_centroid'] = list(zip(round(df['mean_latitude'], 6), round(df['mean_longitude'], 6)))
-
+    visited = []
+    # Compute using NumPy
+    for index in range(len(data)):
+        row_0 = data[index]
+        for row_index in range(len(data)):
+            id = (data[row_index, 0], data[row_index, 1])
+            if id not in visited:
+                distance = haversine(
+                    row_0[1], row_0[0], data[row_index, 1], data[row_index, 0])
+                if distance < stop_threshold:
+                    lat = data[row_index, 0]
+                    lon = data[row_index, 1]
+                    truck_id = data[row_index, 2]
+                    time_stopped = data[row_index, 3]
+                    timestamp = data[row_index, 4]
+                    cluster_key = (index, row_0[0], row_0[1])
+                    if cluster_key not in cluster_details:
+                        cluster_details[cluster_key] = {
+                            'coords': [(lat, lon, truck_id)],
+                            'waiting_time': [time_stopped],
+                            'arrival_time': [timestamp],
+                            'departure_time': [timestamp + time_stopped],
+                            'total_wait_time': time_stopped
+                        }
+                    else:
+                        cluster_details[cluster_key]['coords'].append(
+                            (lat, lon, truck_id))
+                        cluster_details[cluster_key]['waiting_time'].append(
+                            time_stopped)
+                        cluster_details[cluster_key]['total_wait_time'] += time_stopped
+                        cluster_details[cluster_key]['arrival_time'].append(
+                            timestamp)
+                        cluster_details[cluster_key]['departure_time'].append(
+                            timestamp + time_stopped)
+                    visited.append(id)
+    # Construct final DataFrame
+    cluster_data = []
+    for key, details in cluster_details.items():
+        mean_lat = np.mean([lat for lat, _, _ in details['coords']])
+        mean_lon = np.mean([lon for _, lon, _ in details['coords']])
+        num_trucks = count_truck_occurrences(
+            details['coords'], details['waiting_time'])
+        total_stops = sum(num_trucks[0].values())
+        cluster_data.append({
+            'arrival_time': details['arrival_time'],
+            'departure_time': details['departure_time'],
+            'waiting_time': details['waiting_time'],
+            'total_wait_time': details['total_wait_time'],
+            'mean_latitude': mean_lat,
+            'mean_longitude': mean_lon,
+            'coordinates': details['coords'],
+            'num_trucks_stops': num_trucks[0],
+            'num_trucks_waittime': num_trucks[1],
+            'avg_wait_time_per_truck':  dict(zip(num_trucks[0], [num_trucks[1][i]/num_trucks[0][i] for i in num_trucks[0]])),
+            'avg_wait_time': np.mean([num_trucks[1][i]/num_trucks[0][i] for i in num_trucks[0]]),
+            'Frequency_of_stops': total_stops
+        })
+    result_df = pd.DataFrame(cluster_data)
+    result_df['cluster_centroid'] = list(
+        zip(result_df['mean_latitude'], result_df['mean_longitude']))
     # Assign cluster labels to each cluster centroid
     cluster_labels = {tuple(row): f'Cluster {i + 1}' for i, row in enumerate(
-        df[['mean_latitude', 'mean_longitude']].drop_duplicates().itertuples(index=False))}
-    df['clusters'] = df[['mean_latitude', 'mean_longitude']].apply(tuple, axis=1).map(cluster_labels)
-
-    # Calculate the frequency of each cluster
-    df['Frequency_of_stops'] = df.groupby('cluster_centroid')['cluster_centroid'].transform('count')
-
+        result_df[['mean_latitude', 'mean_longitude']].drop_duplicates().itertuples(index=False))}
+    result_df['clusters'] = result_df[['mean_latitude', 'mean_longitude']].apply(
+        tuple, axis=1).map(cluster_labels)
+    # Get location of coordinates
+    # df['location_address'] = df['cluster_centroid'].apply(get_location)
     # Drop duplicate cluster_centroids
-    df = df.drop_duplicates(subset='cluster_centroid')
-    df = df.drop(columns=['mean_latitude', 'mean_longitude'])
-
-    return df
+    result_df = result_df.drop_duplicates(subset='cluster_centroid')
+    result_df = result_df.drop(columns=['mean_latitude', 'mean_longitude'])
+    return result_df
 
 
 def estimate_proximity_and_closest_cluster(dataframe):
@@ -231,8 +272,9 @@ def estimate_proximity_and_closest_cluster(dataframe):
 
     # Calculate distance between each pair of clusters
     for i in range(len(dataframe)):
-        distances = []
+        distances = {}
         for j in range(len(dataframe)):
+            cluster_j = dataframe.clusters.iloc[j]
             if i != j:
                 # Convert latitude and longitude to radians
                 lat1, lon1 = dataframe.cluster_centroid.apply(
@@ -240,28 +282,35 @@ def estimate_proximity_and_closest_cluster(dataframe):
                 lat2, lon2 = dataframe.cluster_centroid.apply(
                     lambda x: x[0]).iloc[j], dataframe.cluster_centroid.apply(lambda x: x[1]).iloc[j]
 
-                # Calculate haversine distance
+                # Calculate haversine distance but make sure each value is float
                 distance = haversine(lat1, lon1, lat2, lon2)
-                distances.append(distance)
-            else:
-                distances.append(np.inf)  # Set distance to infinity for the same cluster (to be ignored)
+                if cluster_j not in distances:
+                    distances[cluster_j] = distance
 
-        min_distance = min(distances)
-        proximity_of_clusters.append(min_distance)  
-        closest_cluster_index = distances.index(min_distance)  
-        closest_clusters.append(closest_cluster_index)  
+            else:
+                # Set distance to infinity for the same cluster (to be ignored)
+                distances[cluster_j] = np.inf
+
+        min_distance = min(distances.values())
+
+        # Append the cluster aand its distance to the list
+        proximity_of_clusters.append(min_distance)
+
+        # Apeend the closest cluster name to the list
+        closest_clusters.append(
+            list(distances.keys())[list(distances.values()).index(min_distance)])
 
     # Add new columns 'proximity_of_clusters' and 'closest_cluster_index' to the DataFrame
     dataframe['proximity_of_clusters'] = proximity_of_clusters
-    dataframe['closest_cluster_index'] = closest_clusters
+    dataframe['closest_cluster'] = closest_clusters
 
     return dataframe
 
 
-def create_geofence_target_label(dataframe, 
-                                    waiting_time_threshold, 
-                                    frequency_threshold, 
-                                    proximity_threshold):
+def create_geofence_target_label(dataframe,
+                                 waiting_time_threshold,
+                                 frequency_threshold,
+                                 proximity_threshold):
     """
     Assign labels to rows based on specified thresholds \
         for waiting time, frequency, and proximity.
@@ -279,13 +328,13 @@ def create_geofence_target_label(dataframe,
     """
     # Find the maximum Frequency_of_stops for each closest_cluster_index
     max_freq_per_index = dataframe.groupby(
-        'closest_cluster_index')['Frequency_of_stops'].max()
+        'closest_cluster')['Frequency_of_stops'].max()
 
     # Apply rules to create target variable
     def assign_label(row):
-        if (row['waiting_time'] > waiting_time_threshold) and \
-           (row['Frequency_of_stops'] == \
-            max_freq_per_index[row['closest_cluster_index']]) and \
+        if (row['total_wait_time'] > waiting_time_threshold) and \
+           (row['Frequency_of_stops'] ==
+            max_freq_per_index[row['closest_cluster']]) and \
            (row['proximity_of_clusters'] < proximity_threshold) and \
            (row['Frequency_of_stops'] >= frequency_threshold):
             return 1
@@ -296,3 +345,206 @@ def create_geofence_target_label(dataframe,
     dataframe['is_geofence'] = dataframe.apply(assign_label, axis=1)
 
     return dataframe
+
+
+def recommendation_algo(df, unique_ids, use_case, size):
+    bounds = {
+        'Optimization': {
+            'lower_bounds': {
+                'Frequency_of_stops': 2,
+                'homogeneous': 0,
+                'num_ids': 0,
+                'avg_wait_time_hours': 3
+            },
+            'upper_bounds': {
+                'Frequency_of_stops': float('inf'),
+                'homogeneous': float('inf'),
+                'num_ids': 1,
+                'avg_wait_time_hours': 5
+            }
+        },
+        'Tracking': {
+            'lower_bounds': {
+                'Frequency_of_stops': 20,
+                'homogeneous': 0.2,
+                'num_ids': 0.2,
+                'avg_wait_time_hours': 1
+            },
+            'upper_bounds': {
+                'Frequency_of_stops': float('inf'),
+                'homogeneous': float('inf'),
+                'num_ids': float('inf'),
+                'avg_wait_time_hours': float('inf')
+            }
+        },
+        'Safety': {
+            'lower_bounds': {
+                'Frequency_of_stops': 1,
+                'homogeneous': 0,
+                'num_ids': 0,
+                'avg_wait_time_hours': 10
+            },
+            'upper_bounds': {
+                'Frequency_of_stops': float('inf'),
+                'homogeneous': float('inf'),
+                'num_ids': 0.1,
+                'avg_wait_time_hours': float('inf')
+            }
+        },
+        'Reset': {
+            'lower_bounds': {
+                'Frequency_of_stops': 0,
+                'homogeneous': 0,
+                'num_ids': 0,
+                'avg_wait_time_hours': 0
+            },
+            'upper_bounds': {
+                'Frequency_of_stops': float('inf'),
+                'homogeneous': float('inf'),
+                'num_ids': 0,
+                'avg_wait_time_hours': float('inf')
+            }
+        }
+    }
+
+    def filter_threshold(df, bounds, use_case, size):
+        # Retrieve the specific lower and upper bounds for the use case
+        lower_bounds = bounds[use_case]['lower_bounds']
+        upper_bounds = bounds[use_case]['upper_bounds']
+
+        # Adjust bounds based on the size parameter
+        if size == 'small':
+            lower_bounds['num_ids'] = 0
+
+        # Filter the dataframe based on the bounds
+        filtered_df = df[
+            (df['Frequency_of_stops'] >= lower_bounds['Frequency_of_stops']) &
+            (df['Frequency_of_stops'] <= upper_bounds['Frequency_of_stops']) &
+            (df['homogeneous'] >= lower_bounds['homogeneous']) &
+            (df['homogeneous'] <= upper_bounds['homogeneous']) &
+            (df['num_ids'] >= lower_bounds['num_ids']) &
+            (df['num_ids'] <= upper_bounds['num_ids']) &
+            (df['avg_wait_time_hours'] >= lower_bounds['avg_wait_time_hours']) &
+            (df['avg_wait_time_hours'] <= upper_bounds['avg_wait_time_hours'])
+        ]
+
+        return filtered_df
+
+    def calculate_homogeneous_score(value_dict, smoothing=1):
+        values = np.array(list(value_dict.values()), dtype=np.float64)
+        values += smoothing  # Applying Laplace smoothing
+        total = values.sum()
+        if total > 0:
+            proportions = values / total
+
+            entropy_value = entropy(proportions, base=2)
+            if entropy_value == 0:
+                if len(proportions) == 1:
+                    return 1
+            elif entropy_value > 0:
+                score = 1 / entropy_value
+                return score
+        return 0
+
+    def count_ids(value_dict):
+        return len(value_dict)/unique_ids
+
+    def get_polygon_coords(data):
+        polygon_coords = []
+        for i in data:
+            polygon_coords.append((i[0], i[1]))
+        return polygon_coords
+
+    # Example usage with a DataFrame column
+    df['homogeneous'] = df['num_trucks_stops'].apply(
+        calculate_homogeneous_score)
+    df['num_ids'] = df['num_trucks_stops'].apply(count_ids)
+    df['avg_wait_time_hours'] = df['avg_wait_time'].dt.total_seconds() / 3600
+    df['Points'] = df['coordinates'].apply(get_polygon_coords)
+
+    recommended_stops = filter_threshold(df, bounds, use_case, size)
+
+    return recommended_stops
+
+
+# Function to convert hex color to RGBA
+def hex_to_rgba(hex_color, alpha):
+    hex_color = hex_color.lstrip('#')
+    r, g, b = int(hex_color[:2], 16), int(
+        hex_color[2:4], 16), int(hex_color[4:], 16)
+    return f'rgba({r}, {g}, {b}, {alpha})'
+
+
+def create_cluster_map(final_df, fill_colour, use_case):
+    # Initialize the map at the centroid of the first cluster
+    start_latitude = float(final_df.iloc[0]['cluster_centroid'][0])
+    start_longitude = float(final_df.iloc[0]['cluster_centroid'][1])
+    m_cluster = folium.Map(
+        location=[start_latitude, start_longitude], zoom_start=4)
+
+    # Loop through each cluster's points to create polygons
+    for points in final_df.Points:
+        # Calculate the boundary coordinates for the polygon
+        min_lat = min(coord[0] for coord in points)
+        max_lat = max(coord[0] for coord in points)
+        min_lon = min(coord[1] for coord in points)
+        max_lon = max(coord[1] for coord in points)
+
+        boundary_coordinates = [
+            (min_lat, min_lon),
+            (min_lat, max_lon),
+            (max_lat, max_lon),
+            (max_lat, min_lon),
+            (min_lat, min_lon)
+        ]
+
+        # Calculate the area and create a polygon on the map
+        area = Polygon(boundary_coordinates).area * 10**6
+        folium.Polygon(
+            locations=boundary_coordinates,
+            color=fill_colour,
+            fill=True,
+            fill_color=fill_colour,
+            fill_opacity=0.5,
+            weight=0.2,
+            popup=folium.Popup(f'Area: {area:.2f} sq.km', parse_html=True)
+        ).add_to(m_cluster)
+
+        # Add CircleMarkers for each point within the cluster
+        for coord in points:
+            folium.CircleMarker(
+                location=coord,
+                radius=2,
+                color=fill_colour,
+                fill=True,
+                fill_color=fill_colour
+            ).add_to(m_cluster)
+
+    # Adding points for each cluster's centroid with additional data
+    for _, row in final_df.iterrows():
+        popup_width = 200
+        background_color = hex_to_rgba(fill_colour, 0.3)
+        popup_content = f'''
+                    <div style="background-color: {background_color}; padding: 10px; border-radius: 5px; width: {popup_width}px;">
+                    <strong>{row['clusters']}</strong> <br>
+                    No of Trucks: <strong>{len(row['num_trucks_stops'])}</strong> <br>
+                    Total wait time: <strong>{row['total_wait_time']}</strong> <br>
+                    Average wait time: <strong>{str(row['avg_wait_time']).split('.')[0]}</strong> <br>
+                    Frequency of Stops: <strong> {row['Frequency_of_stops']}</strong> <br>
+                    Cluster type: <strong>{use_case}</strong>
+                    </div>
+                    '''
+
+        popup = folium.Popup(popup_content, max_width=popup_width)
+        folium.CircleMarker(
+            location=[row['cluster_centroid'][0], row['cluster_centroid'][1]],
+            radius=10,
+            color=fill_colour,
+            popup=popup,
+            fill=True,
+            fill_color=fill_colour,
+            fill_opacity=0.6
+        ).add_to(m_cluster)
+
+    # Return the map object
+    return m_cluster
